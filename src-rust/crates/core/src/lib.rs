@@ -631,6 +631,7 @@ pub mod config {
         Dark,
         Light,
         Custom(String),
+        Deuteranopia,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]

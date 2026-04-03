@@ -62,12 +62,19 @@ const TOOL_RESULT_MAX_LINES: usize = 30;
 pub fn render_code_block(lang: Option<&str>, code: &str, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let label = lang.unwrap_or("code");
+    // Language label in brackets at the top
     lines.push(Line::from(vec![Span::styled(
-        format!("--- {} ", label),
-        Style::default().fg(Color::DarkGray),
+        format!("  [{lang_name}]", lang_name = label),
+        Style::default()
+            .fg(Color::Rgb(150, 150, 150))
+            .add_modifier(Modifier::DIM),
+    )]));
+    lines.push(Line::from(vec![Span::styled(
+        "  ┌─────────────────────────────────────────────────".to_string(),
+        Style::default().fg(Color::Rgb(100, 100, 100)),
     )]));
     // `2` chars for the leading "  " indent; at least 10 chars of content
-    let max_content = (width as usize).saturating_sub(2).max(10);
+    let max_content = (width as usize).saturating_sub(4).max(10);
     for line in code.lines() {
         let display: String = if line.chars().count() > max_content {
             let truncated: String = line.chars().take(max_content.saturating_sub(1)).collect();
@@ -76,13 +83,13 @@ pub fn render_code_block(lang: Option<&str>, code: &str, width: u16) -> Vec<Line
             line.to_string()
         };
         lines.push(Line::from(vec![
-            Span::styled("  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  │ ", Style::default().fg(Color::Rgb(100, 100, 100))),
             Span::styled(display, Style::default().fg(Color::White)),
         ]));
     }
     lines.push(Line::from(vec![Span::styled(
-        "----------------".to_string(),
-        Style::default().fg(Color::DarkGray),
+        "  └─────────────────────────────────────────────────".to_string(),
+        Style::default().fg(Color::Rgb(100, 100, 100)),
     )]));
     lines
 }
@@ -272,14 +279,16 @@ pub fn render_tool_result_success(output: &str, truncated: bool) -> Vec<Line<'st
 /// Render a tool result (error variant).
 pub fn render_tool_result_error(error: &str) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    // Use orange instead of red for color-blind accessibility
+    let error_color = Color::Rgb(255, 140, 0);  // Orange
     lines.push(Line::from(vec![Span::styled(
-        "x Error",
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        "✗ Error",
+        Style::default().fg(error_color).add_modifier(Modifier::BOLD),
     )]));
     for line in error.lines().take(10) {
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(line.to_string(), Style::default().fg(Color::Red)),
+            Span::styled(line.to_string(), Style::default().fg(error_color)),
         ]));
     }
     lines
@@ -604,23 +613,26 @@ fn prefix_message_lines(
         return rendered;
     }
 
-    let (prefix, prefix_style, body_style) = match role {
+    let (prefix, prefix_style, body_style, role_indicator) = match role {
         Role::User => (
             "› ",
             Style::default()
                 .fg(Color::Rgb(233, 30, 99))
                 .add_modifier(Modifier::BOLD),
             Style::default().fg(Color::White),
+            "[You] ",
         ),
         Role::Assistant => (
-            "\u{2022} ",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            "◆ ",
+            Style::default().fg(Color::Rgb(0, 150, 200)).add_modifier(Modifier::BOLD),
             Style::default().fg(Color::White),
+            "[Claude] ",
         ),
     };
 
     if let Some(first) = rendered.first_mut() {
-        let mut spans = Vec::with_capacity(first.spans.len() + 1);
+        let mut spans = Vec::with_capacity(first.spans.len() + 2);
+        spans.push(Span::styled(role_indicator.to_string(), prefix_style));
         spans.push(Span::styled(prefix.to_string(), prefix_style));
         spans.extend(first.spans.clone());
         first.spans = spans;

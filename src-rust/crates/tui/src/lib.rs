@@ -56,6 +56,8 @@ pub mod plugin_views;
 pub mod settings_screen;
 /// Theme picker overlay.
 pub mod theme_screen;
+/// Color palette management for different themes and accessibility support.
+pub mod theme_colors;
 /// Privacy settings dialog.
 pub mod privacy_screen;
 /// Diff viewer dialog (two-pane: file list + unified diff detail).
@@ -82,6 +84,8 @@ pub mod hooks_config_menu;
 pub mod overage_upsell;
 /// Voice mode availability notice (shown when voice is available but not enabled).
 pub mod voice_mode_notice;
+/// Message copy utilities for different formatting options (markdown, plaintext, code, JSON).
+pub mod message_copy;
 /// Desktop app upsell startup dialog (shown at startup on macOS/Windows x64).
 pub mod desktop_upsell_startup;
 /// Memory update notification banner (shown after Claude updates a CLAUDE.md file).

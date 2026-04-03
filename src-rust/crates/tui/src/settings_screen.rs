@@ -603,10 +603,11 @@ fn build_display_lines(screen: &SettingsScreen) -> Vec<Line<'static>> {
         cc_core::config::Theme::Default => "default",
         cc_core::config::Theme::Dark => "dark",
         cc_core::config::Theme::Light => "light",
+        cc_core::config::Theme::Deuteranopia => "deuteranopia",
         cc_core::config::Theme::Custom(s) => s.as_str(),
     };
     lines.push(label_value_line("Theme", theme_name));
-    lines.push(indent_line("  Options: default, dark, light  (use /theme to change)", Color::DarkGray));
+    lines.push(indent_line("  Options: default, dark, light, deuteranopia  (use /theme to change)", Color::DarkGray));
     lines.push(Line::from(""));
 
     // Output format

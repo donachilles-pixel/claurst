@@ -137,6 +137,10 @@ pub struct ContextMenuState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextMenuItem {
     Copy,
+    CopyAsMarkdown,
+    CopyAsPlaintext,
+    CopyCodeBlocks,
+    CopyAsJson,
     Paste,
     Cut,
     SelectAll,
@@ -573,6 +577,8 @@ pub struct App {
     pub thinking_row_map: RefCell<std::collections::HashMap<u16, u64>>,
     /// Total message lines from the last render (used for virtual row mapping).
     pub total_message_lines: Cell<usize>,
+    /// Scroll offset from the last render frame (used for selection validation).
+    pub last_render_scroll_offset: Cell<u16>,
 
     // ---- Text selection state --------------------------------------------
     /// Selection drag anchor (col, row) — set on mouse-down.
@@ -742,6 +748,7 @@ impl App {
             elicitation: crate::elicitation_dialog::ElicitationDialogState::new(),
             model_picker: ModelPickerState::new(),
             session_browser: SessionBrowserState::new(),
+            session_branching: crate::session_branching::SessionBranchingState::new(),
             tasks_overlay: TasksOverlay::new(),
             export_dialog: ExportDialogState::new(),
             context_viz: ContextVizState::new(),
@@ -799,6 +806,7 @@ impl App {
             last_msg_area: Cell::new(ratatui::layout::Rect::default()),
             thinking_row_map: RefCell::new(std::collections::HashMap::new()),
             total_message_lines: Cell::new(0),
+            last_render_scroll_offset: Cell::new(0),
             selection_anchor: None,
             selection_focus: None,
             selection_text: RefCell::new(String::new()),
@@ -844,6 +852,7 @@ impl App {
             "dark" => Theme::Dark,
             "light" => Theme::Light,
             "default" => Theme::Default,
+            "deuteranopia" => Theme::Deuteranopia,
             other => Theme::Custom(other.to_string()),
         };
         self.config.theme = theme;
@@ -868,6 +877,7 @@ impl App {
                     Theme::Dark => "dark",
                     Theme::Light => "light",
                     Theme::Default => "default",
+                    Theme::Deuteranopia => "deuteranopia",
                     Theme::Custom(s) => s.as_str(),
                 };
                 self.theme_screen.open(current);
@@ -2949,6 +2959,83 @@ impl App {
                 self.history_search_overlay.select_next();
                 false
             }
+            // ========== NEW KEYBINDING ACTIONS (Phase 1) ==========
+            "clearLine" => {
+                // Ctrl+L: Clear the current input line (like bash Ctrl+L)
+                self.prompt_input.text.clear();
+                self.prompt_input.cursor = 0;
+                self.refresh_prompt_input();
+                false
+            }
+            "deleteCharBefore" => {
+                // Ctrl+H: Delete character before cursor (backspace equivalent)
+                if !self.is_streaming {
+                    self.prompt_input.backspace();
+                    self.refresh_prompt_input();
+                }
+                false
+            }
+            "previousMessage" => {
+                // Alt+←: Navigate to previous message in transcript
+                self.scroll_offset = self.scroll_offset.saturating_add(5);
+                self.auto_scroll = false;
+                false
+            }
+            "nextMessage" => {
+                // Alt+→: Navigate to next message in transcript
+                let new_off = self.scroll_offset.saturating_sub(5);
+                self.scroll_offset = new_off;
+                if new_off == 0 {
+                    self.auto_scroll = true;
+                }
+                false
+            }
+            "jumpToNextError" => {
+                // Ctrl+.: Jump to next error/issue in messages
+                self.jump_to_next_error();
+                false
+            }
+            "jumpToPreviousError" => {
+                // Ctrl+Shift+.: Jump to previous error/issue in messages
+                self.jump_to_previous_error();
+                false
+            }
+            "reverseIndent" => {
+                // Shift+Tab: Reverse indent (cycle permission mode)
+                use cc_core::config::PermissionMode;
+                self.config.permission_mode = match self.config.permission_mode {
+                    PermissionMode::Default => PermissionMode::AcceptEdits,
+                    PermissionMode::AcceptEdits => PermissionMode::BypassPermissions,
+                    PermissionMode::BypassPermissions => PermissionMode::Default,
+                    PermissionMode::Plan => PermissionMode::Default,
+                };
+                let label = match self.config.permission_mode {
+                    PermissionMode::Default => "Default permissions",
+                    PermissionMode::AcceptEdits => "Accept-edits mode",
+                    PermissionMode::BypassPermissions => "Bypass permissions (dangerous)",
+                    PermissionMode::Plan => "Plan mode",
+                };
+                self.status_message = Some(label.to_string());
+                false
+            }
+            "openHelp" => {
+                // Ctrl+H: Open help (alternative to F1)
+                self.show_help = !self.show_help;
+                self.help_overlay.toggle();
+                false
+            }
+            "deleteWord" => {
+                // Alt+D: Delete word forward
+                if !self.is_streaming {
+                    self.prompt_input.delete_word_at_cursor();
+                    self.refresh_prompt_input();
+                }
+                false
+            }
+            "sendMessage" => {
+                // Ctrl+M: Send message (alternative to Enter)
+                !self.is_streaming
+            }
             _ => false,
         }
     }
@@ -3110,7 +3197,7 @@ impl App {
 
     /// Find word boundaries for the character at (col, row) in the selection text.
     /// Returns (start_col, end_col) for the word containing the given position.
-    fn find_word_boundaries(&self, col: u16, row: u16) -> Option<(u16, u16)> {
+    fn find_word_boundaries(&self, col: u16, _row: u16) -> Option<(u16, u16)> {
         // Get the current selection text to determine word boundaries
         let text = self.selection_text.borrow();
         if text.is_empty() {
@@ -3156,7 +3243,8 @@ impl App {
     /// Handle context menu navigation with arrow keys.
     fn navigate_context_menu(&mut self, direction: KeyCode) {
         if let Some(mut menu) = self.context_menu_state {
-            let item_count = 5; // Copy, Paste, Cut, Select All, Clear
+            // Copy (4 variants) + Paste, Cut, Select All, Clear = 8 items
+            let item_count = 9;
             match direction {
                 KeyCode::Up => {
                     menu.selected_index = menu.selected_index.saturating_sub(1);
@@ -3175,6 +3263,10 @@ impl App {
         if let Some(menu) = self.context_menu_state {
             let items = [
                 ContextMenuItem::Copy,
+                ContextMenuItem::CopyAsMarkdown,
+                ContextMenuItem::CopyAsPlaintext,
+                ContextMenuItem::CopyCodeBlocks,
+                ContextMenuItem::CopyAsJson,
                 ContextMenuItem::Paste,
                 ContextMenuItem::Cut,
                 ContextMenuItem::SelectAll,
@@ -3195,7 +3287,92 @@ impl App {
             ContextMenuItem::Copy => {
                 let text = self.selection_text.borrow();
                 if !text.is_empty() {
+                    if crate::message_copy::copy_to_clipboard(&text) {
+                        self.notifications.push(
+                            NotificationKind::Info,
+                            format!("Copied {} chars to clipboard.", text.len()),
+                            Some(3),
+                        );
+                    } else {
+                        self.notifications.push(
+                            NotificationKind::Warning,
+                            "Failed to copy to clipboard.".to_string(),
+                            Some(3),
+                        );
+                    }
                     debug!("Copy action triggered, text: {} chars", text.len());
+                }
+            }
+            ContextMenuItem::CopyAsMarkdown => {
+                if let Some(msg) = self.messages.last() {
+                    let markdown = crate::message_copy::copy_as_markdown(msg);
+                    if crate::message_copy::copy_to_clipboard(&markdown) {
+                        self.notifications.push(
+                            NotificationKind::Info,
+                            "Copied as Markdown.".to_string(),
+                            Some(3),
+                        );
+                    } else {
+                        self.notifications.push(
+                            NotificationKind::Warning,
+                            "Failed to copy to clipboard.".to_string(),
+                            Some(3),
+                        );
+                    }
+                }
+            }
+            ContextMenuItem::CopyAsPlaintext => {
+                if let Some(msg) = self.messages.last() {
+                    let plaintext = crate::message_copy::copy_as_plaintext(msg);
+                    if crate::message_copy::copy_to_clipboard(&plaintext) {
+                        self.notifications.push(
+                            NotificationKind::Info,
+                            "Copied as plaintext.".to_string(),
+                            Some(3),
+                        );
+                    } else {
+                        self.notifications.push(
+                            NotificationKind::Warning,
+                            "Failed to copy to clipboard.".to_string(),
+                            Some(3),
+                        );
+                    }
+                }
+            }
+            ContextMenuItem::CopyCodeBlocks => {
+                if let Some(msg) = self.messages.last() {
+                    let code = crate::message_copy::copy_code_blocks(msg);
+                    if crate::message_copy::copy_to_clipboard(&code) {
+                        self.notifications.push(
+                            NotificationKind::Info,
+                            "Copied code blocks.".to_string(),
+                            Some(3),
+                        );
+                    } else {
+                        self.notifications.push(
+                            NotificationKind::Warning,
+                            "Failed to copy to clipboard.".to_string(),
+                            Some(3),
+                        );
+                    }
+                }
+            }
+            ContextMenuItem::CopyAsJson => {
+                if let Some(msg) = self.messages.last() {
+                    let json = crate::message_copy::copy_as_json(msg);
+                    if crate::message_copy::copy_to_clipboard(&json) {
+                        self.notifications.push(
+                            NotificationKind::Info,
+                            "Copied as JSON.".to_string(),
+                            Some(3),
+                        );
+                    } else {
+                        self.notifications.push(
+                            NotificationKind::Warning,
+                            "Failed to copy to clipboard.".to_string(),
+                            Some(3),
+                        );
+                    }
                 }
             }
             ContextMenuItem::Paste => {
@@ -3204,6 +3381,13 @@ impl App {
             ContextMenuItem::Cut => {
                 let text = self.selection_text.borrow();
                 if !text.is_empty() {
+                    if crate::message_copy::copy_to_clipboard(&text) {
+                        self.notifications.push(
+                            NotificationKind::Info,
+                            "Cut to clipboard.".to_string(),
+                            Some(3),
+                        );
+                    }
                     debug!("Cut action triggered, text: {} chars", text.len());
                     self.selection_anchor = None;
                     self.selection_focus = None;
@@ -3270,7 +3454,10 @@ impl App {
                 self.dismiss_context_menu();
 
                 let msg_area = self.last_msg_area.get();
-                if mouse_event.column >= msg_area.x
+                if msg_area.width == 0 || msg_area.height == 0 {
+                    // Message area not initialized yet
+                    self.click_count = 0;
+                } else if mouse_event.column >= msg_area.x
                     && mouse_event.column < msg_area.x.saturating_add(msg_area.width)
                     && mouse_event.row >= msg_area.y
                     && mouse_event.row < msg_area.y.saturating_add(msg_area.height) {
@@ -3307,8 +3494,10 @@ impl App {
                     self.last_click_time = Some(now);
                     self.last_click_position = Some(current_pos);
                 } else {
-                    // Click outside message area resets click count
+                    // Click outside message area resets click count and selection
                     self.click_count = 0;
+                    self.selection_anchor = None;
+                    self.selection_focus = None;
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -3318,12 +3507,20 @@ impl App {
                 // Continue drag within message pane bounds
                 if self.selection_anchor.is_some() {
                     let msg_area = self.last_msg_area.get();
-                    if mouse_event.column >= msg_area.x
+                    if msg_area.width > 0 && msg_area.height > 0
+                        && mouse_event.column >= msg_area.x
                         && mouse_event.column < msg_area.x.saturating_add(msg_area.width)
                         && mouse_event.row >= msg_area.y
                         && mouse_event.row < msg_area.y.saturating_add(msg_area.height) {
                         self.selection_focus = Some((mouse_event.column, mouse_event.row));
                         self.click_count = 0; // Reset on drag to prevent further double-clicks
+                    } else if mouse_event.column < msg_area.x
+                        || mouse_event.column >= msg_area.x.saturating_add(msg_area.width)
+                        || mouse_event.row < msg_area.y
+                        || mouse_event.row >= msg_area.y.saturating_add(msg_area.height) {
+                        // Drag went outside message area - cancel selection
+                        self.selection_anchor = None;
+                        self.selection_focus = None;
                     }
                 }
             }
@@ -3740,6 +3937,64 @@ impl App {
                 }
             }
         }
+    }
+
+    // ========== NEW KEYBINDING HELPER FUNCTIONS (Phase 1) ==========
+
+    /// Jump to the next error/issue in messages.
+    /// Searches for common error indicators: "Error:", "ERROR:", "error", "failed", "FAIL".
+    fn jump_to_next_error(&mut self) {
+        const ERROR_KEYWORDS: &[&str] = &["error:", "failed:", "fail"];
+
+        // Search forward from current position
+        for i in 0..self.messages.len() {
+            let msg = &self.messages[i];
+            let content = msg.get_all_text().to_lowercase();
+
+            // Check if message contains error keywords
+            let has_error = ERROR_KEYWORDS.iter().any(|keyword| {
+                content.contains(keyword)
+            });
+
+            if has_error && i > (self.messages.len().saturating_sub(self.scroll_offset / 2)) {
+                // Found an error message, scroll to it
+                let new_offset = self.messages.len().saturating_sub(i);
+                self.scroll_offset = new_offset.saturating_mul(2);
+                self.auto_scroll = false;
+                self.status_message = Some(format!("Error found in message {}", i + 1));
+                return;
+            }
+        }
+
+        self.status_message = Some("No more errors found.".to_string());
+    }
+
+    /// Jump to the previous error/issue in messages.
+    /// Searches backwards for common error indicators.
+    fn jump_to_previous_error(&mut self) {
+        const ERROR_KEYWORDS: &[&str] = &["error:", "failed:", "fail"];
+
+        // Search backward from current position
+        for i in (0..self.messages.len()).rev() {
+            let msg = &self.messages[i];
+            let content = msg.get_all_text().to_lowercase();
+
+            // Check if message contains error keywords
+            let has_error = ERROR_KEYWORDS.iter().any(|keyword| {
+                content.contains(keyword)
+            });
+
+            if has_error && i < (self.messages.len().saturating_sub(self.scroll_offset / 2)) {
+                // Found an error message, scroll to it
+                let new_offset = self.messages.len().saturating_sub(i);
+                self.scroll_offset = new_offset.saturating_mul(2);
+                self.auto_scroll = false;
+                self.status_message = Some(format!("Error found in message {}", i + 1));
+                return;
+            }
+        }
+
+        self.status_message = Some("No previous errors found.".to_string());
     }
 }
 
