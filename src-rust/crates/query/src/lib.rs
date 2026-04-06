@@ -923,12 +923,29 @@ pub async fn run_query_loop(
                 }
             };
 
-            if provider_id_str != "anthropic" {
+            // Dispatch through the provider path for non-Anthropic providers,
+            // AND for Anthropic when the pre-built client has no API key
+            // (user started without ANTHROPIC_API_KEY but added one via /connect).
+            let use_provider_dispatch = provider_id_str != "anthropic"
+                || client.api_key_is_empty();
+
+            if use_provider_dispatch {
                 let pid = claurst_core::provider_id::ProviderId::new(&provider_id_str);
 
-                // Try registry first; if not found, build provider dynamically
-                // from auth_store (handles keys added at runtime via /connect).
-                let mut registry_provider = registry.get(&pid).cloned();
+                // Always prefer a fresh provider built from the auth_store so
+                // that keys added at runtime via /connect are picked up
+                // immediately — even when the provider was pre-registered at
+                // startup with a stale or missing key.
+                let runtime_provider =
+                    claurst_api::registry::runtime_provider_for(&provider_id_str);
+
+                let mut registry_provider = if runtime_provider.is_some() {
+                    // Fresh auth_store key available — use it instead of the
+                    // (possibly stale) registry entry.
+                    None
+                } else {
+                    registry.get(&pid).cloned()
+                };
 
                 // If the user supplied --api-base for a local provider (Ollama, LM Studio,
                 // llama.cpp), rebuild the provider with the override URL.  These providers
@@ -958,72 +975,7 @@ pub async fn run_query_loop(
                     }
                 }
 
-                let dynamic_provider: Option<std::sync::Arc<dyn claurst_api::LlmProvider>> = if registry_provider.is_none() {
-                    let auth_store = claurst_core::AuthStore::load();
-                    if let Some(key) = auth_store.api_key_for(&provider_id_str) {
-                        if !key.is_empty() {
-                            match provider_id_str.as_str() {
-                                "openai" => Some(std::sync::Arc::new(claurst_api::OpenAiProvider::new(key))),
-                                "google" => Some(std::sync::Arc::new(claurst_api::GoogleProvider::new(key))),
-                                "github-copilot" => Some(std::sync::Arc::new(claurst_api::CopilotProvider::new(key))),
-                                "cohere" => {
-                                    if let Some(p) = claurst_api::CohereProvider::from_env() {
-                                        Some(std::sync::Arc::new(p))
-                                    } else {
-                                        None
-                                    }
-                                }
-                                _ => {
-                                    // Use the factory functions that include correct provider quirks
-                                    // (e.g. Mistral tool_id_max_len=9, DeepSeek reasoning_field).
-                                    // The factory reads an env var for the key, but .with_api_key()
-                                    // below replaces it with the runtime-provided key.
-                                    use claurst_api::providers::openai_compat_providers;
-                                    let provider = match provider_id_str.as_str() {
-                                        "groq" => openai_compat_providers::groq().with_api_key(key),
-                                        "mistral" => openai_compat_providers::mistral().with_api_key(key),
-                                        "deepseek" => openai_compat_providers::deepseek().with_api_key(key),
-                                        "xai" => openai_compat_providers::xai().with_api_key(key),
-                                        "openrouter" => openai_compat_providers::openrouter().with_api_key(key),
-                                        "togetherai" | "together-ai" => openai_compat_providers::together_ai().with_api_key(key),
-                                        "perplexity" => openai_compat_providers::perplexity().with_api_key(key),
-                                        "cerebras" => openai_compat_providers::cerebras().with_api_key(key),
-                                        "deepinfra" => openai_compat_providers::deepinfra().with_api_key(key),
-                                        "venice" => openai_compat_providers::venice().with_api_key(key),
-                                        "huggingface" => openai_compat_providers::huggingface().with_api_key(key),
-                                        "nvidia" => openai_compat_providers::nvidia().with_api_key(key),
-                                        "siliconflow" => openai_compat_providers::siliconflow().with_api_key(key),
-                                        "sambanova" => openai_compat_providers::sambanova().with_api_key(key),
-                                        "moonshot" => openai_compat_providers::moonshot().with_api_key(key),
-                                        "zhipu" => openai_compat_providers::zhipu().with_api_key(key),
-                                        "qwen" => openai_compat_providers::qwen().with_api_key(key),
-                                        "nebius" => openai_compat_providers::nebius().with_api_key(key),
-                                        "novita" => openai_compat_providers::novita().with_api_key(key),
-                                        "ovhcloud" => openai_compat_providers::ovhcloud().with_api_key(key),
-                                        "scaleway" => openai_compat_providers::scaleway().with_api_key(key),
-                                        "vultr" | "vultr-ai" => openai_compat_providers::vultr_ai().with_api_key(key),
-                                        "baseten" => openai_compat_providers::baseten().with_api_key(key),
-                                        "friendli" => openai_compat_providers::friendli().with_api_key(key),
-                                        "upstage" => openai_compat_providers::upstage().with_api_key(key),
-                                        "stepfun" => openai_compat_providers::stepfun().with_api_key(key),
-                                        "fireworks" => openai_compat_providers::fireworks().with_api_key(key),
-                                        "ollama" => openai_compat_providers::ollama(),
-                                        "lmstudio" | "lm-studio" => openai_compat_providers::lm_studio(),
-                                        "llamacpp" | "llama-cpp" => openai_compat_providers::llama_cpp(),
-                                        _ => {
-                                            // True fallback: unknown provider, generic OpenAI-compatible
-                                            claurst_api::OpenAiCompatProvider::new(&provider_id_str, &provider_id_str, "https://api.openai.com/v1")
-                                                .with_api_key(key)
-                                        }
-                                    };
-                                    Some(std::sync::Arc::new(provider))
-                                }
-                            }
-                        } else { None }
-                    } else { None }
-                } else { None };
-
-                let provider = registry_provider.or(dynamic_provider);
+                let provider = runtime_provider.or(registry_provider);
                 if let Some(provider) = provider {
                     debug!(provider = %provider_id_str, model = %model_id_str, "Dispatching to non-Anthropic provider");
 
@@ -1259,7 +1211,7 @@ pub async fn run_query_loop(
                         message: assistant_msg,
                         usage,
                     };
-                } else {
+                } else if provider_id_str != "anthropic" {
                     // Non-Anthropic provider detected but no API key / credentials
                     // available.  Return a clear error instead of silently falling
                     // through to the Anthropic client.
@@ -1286,6 +1238,9 @@ pub async fn run_query_loop(
                         ))
                     );
                 }
+                // Anthropic with no auth_store key: fall through to the raw
+                // client path below (which has its own deferred key validation
+                // with detailed model-specific hints).
             }
         }
 

@@ -30,11 +30,12 @@ use claurst_core::file_history::FileHistory;
 use claurst_core::keybindings::{
     KeyContext, KeybindingResolver, KeybindingResult, ParsedKeystroke, UserKeybindings,
 };
-use claurst_core::types::{Message, Role};
+use claurst_core::types::{ContentBlock, Message, Role};
 use claurst_query::QueryEvent;
 use claurst_tools;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::backend::CrosstermBackend;
+use ratatui::style::Color;
 use ratatui::Terminal;
 use std::cell::{Cell, RefCell};
 use std::io::Stdout;
@@ -78,6 +79,7 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("privacy", "Open privacy settings"),
     ("providers", "List available AI providers and their status"),
     ("quit", "Quit Claurst"),
+    ("refresh", "Clear saved provider auth and model caches"),
     ("rename", "Rename this session"),
     ("resume", "Resume a previous session"),
     ("review", "Review changes (git diff)"),
@@ -94,7 +96,7 @@ const PROMPT_SLASH_COMMANDS: &[(&str, &str)] = &[
 
 fn help_command_category(name: &str) -> &'static str {
     match name {
-        "connect" | "model" | "providers" | "fast" | "effort" | "voice" => "Model & Provider",
+        "connect" | "model" | "providers" | "refresh" | "fast" | "effort" | "voice" => "Model & Provider",
         "changes" | "diff" | "review" | "rewind" | "export" | "copy" => "Review & History",
         "stats" | "cost" | "context" | "insights" | "heapdump" | "doctor" => "Diagnostics",
         "config" | "settings" | "theme" | "privacy" | "keybindings" | "hooks" | "mcp" => {
@@ -368,10 +370,20 @@ pub enum ToolStatus {
 pub struct ToolUseBlock {
     pub id: String,
     pub name: String,
+    pub turn_index: Option<usize>,
     pub status: ToolStatus,
     pub output_preview: Option<String>,
     /// JSON-serialised input for the tool call (populated from the API stream).
     pub input_json: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TurnMetadata {
+    pub submitted_at: Option<String>,
+    pub model_name: Option<String>,
+    pub agent_mode: Option<String>,
+    pub duration: Option<String>,
+    pub interrupted: bool,
 }
 
 /// State for Ctrl+R history search mode (legacy inline struct, kept for test
@@ -545,6 +557,7 @@ pub struct App {
     pub scroll_offset: usize,
     pub is_streaming: bool,
     pub streaming_text: String,
+    pub streaming_thinking: String,
     pub status_message: Option<String>,
     /// Randomly chosen thinking verb shown next to the spinner while streaming.
     pub spinner_verb: Option<String>,
@@ -569,6 +582,12 @@ pub struct App {
     pub fast_mode: bool,
     /// Current agent mode name: "build", "plan", "explore", etc.
     pub agent_mode: Option<String>,
+    /// Accent color derived from the current agent mode.
+    /// Build = pink, Plan = blue, Explore = amber.
+    pub accent_color: Color,
+    /// Set by `cycle_agent_mode` so the main loop can update the query config
+    /// and tool list to match the newly-selected agent.
+    pub agent_mode_changed: bool,
     pub agent_status: Vec<(String, String)>,
     pub history_search: Option<HistorySearch>,
     pub keybindings: KeybindingResolver,
@@ -599,6 +618,8 @@ pub struct App {
     pub last_turn_elapsed: Option<String>,
     /// Past-tense verb shown after turn completes, e.g. "Worked" / "Baked".
     pub last_turn_verb: Option<&'static str>,
+    /// Per-user turn snapshots used by the transcript renderer.
+    pub turn_metadata: Vec<TurnMetadata>,
     /// Incremented whenever transcript-visible state changes so rendering can
     /// reuse cached layout between keystrokes.
     pub transcript_version: Cell<u64>,
@@ -713,6 +734,12 @@ pub struct App {
     /// When `true`, the main event loop should spawn an async task to fetch
     /// the model list from the current provider's `list_models()` API.
     pub model_picker_fetch_pending: bool,
+    /// When `true`, the main event loop should spawn an async task to load
+    /// the session list from disk and populate the session browser.
+    pub session_list_pending: bool,
+    /// Receiver for background session-list results.
+    pub session_list_rx:
+        Option<tokio::sync::mpsc::Receiver<Vec<crate::session_browser::SessionEntry>>>,
     /// Credential store for provider API keys and OAuth tokens.
     pub auth_store: claurst_core::AuthStore,
     /// Connect-a-provider dialog (/connect command).
@@ -879,17 +906,46 @@ fn sample_completion_verb(seed: usize) -> &'static str {
     TURN_COMPLETION_VERBS[seed % TURN_COMPLETION_VERBS.len()]
 }
 
-/// Format a duration in seconds to a human-readable string, e.g. "2m 5s".
-fn format_elapsed(secs: u64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else {
-        format!("{}m {}s", secs / 60, secs % 60)
+/// Format a duration in milliseconds to a human-readable string.
+///
+/// Matches OpenCode's behaviour: rounds to whole seconds, shows "Xs" for
+/// durations under a minute, "Xm Ys" for longer ones.
+/// Accent color for build mode (default pink).
+pub const ACCENT_BUILD: Color = Color::Rgb(233, 30, 99);
+/// Accent color for plan mode (blue).
+pub const ACCENT_PLAN: Color = Color::Rgb(66, 135, 245);
+/// Accent color for explore mode (amber).
+pub const ACCENT_EXPLORE: Color = Color::Rgb(245, 189, 66);
+
+/// Return the accent color for a given agent mode name.
+pub fn accent_for_mode(mode: Option<&str>) -> Color {
+    match mode {
+        Some("plan") => ACCENT_PLAN,
+        Some("explore") => ACCENT_EXPLORE,
+        _ => ACCENT_BUILD,
     }
+}
+
+fn format_elapsed_ms(ms: u128) -> String {
+    let total_secs = ((ms + 500) / 1000) as u64; // round to nearest second
+    if total_secs < 60 {
+        format!("{}s", total_secs)
+    } else {
+        format!("{}m {}s", total_secs / 60, total_secs % 60)
+    }
+}
+
+fn format_turn_time_label() -> String {
+    chrono::Local::now()
+        .format("%I:%M %p")
+        .to_string()
+        .trim_start_matches('0')
+        .to_lowercase()
 }
 
 impl App {
     pub fn new(config: Config, cost_tracker: Arc<CostTracker>) -> Self {
+        let config = config;
         let model_name = config.effective_model().to_string();
         let user_keybindings = UserKeybindings::load(&Settings::config_dir());
         Self {
@@ -905,6 +961,7 @@ impl App {
             scroll_offset: 0,
             is_streaming: false,
             streaming_text: String::new(),
+            streaming_thinking: String::new(),
             status_message: None,
             spinner_verb: None,
             should_quit: false,
@@ -920,6 +977,8 @@ impl App {
             effort_level: EffortLevel::Normal,
             fast_mode: false,
             agent_mode: None,
+            agent_mode_changed: false,
+            accent_color: ACCENT_BUILD,
             agent_status: Vec::new(),
             history_search: None,
             keybindings: KeybindingResolver::new(&user_keybindings),
@@ -931,6 +990,7 @@ impl App {
             turn_start: None,
             last_turn_elapsed: None,
             last_turn_verb: None,
+            turn_metadata: Vec::new(),
             transcript_version: Cell::new(0),
             help_overlay: {
                 let mut overlay = HelpOverlay::new();
@@ -994,6 +1054,8 @@ impl App {
                 reg
             },
             model_picker_fetch_pending: false,
+            session_list_pending: false,
+            session_list_rx: None,
             auth_store: claurst_core::AuthStore::load(),
             connect_dialog: DialogSelectState::new("Connect a provider", provider_picker_items()),
             command_palette: {
@@ -1096,6 +1158,103 @@ impl App {
     #[cfg(not(feature = "token_budget"))]
     fn load_token_budget() -> Option<u32> {
         None
+    }
+
+    fn current_user_turn_index(&self) -> Option<usize> {
+        self.messages
+            .iter()
+            .filter(|msg| msg.role == Role::User)
+            .count()
+            .checked_sub(1)
+    }
+
+    fn current_agent_mode_snapshot(&self) -> String {
+        self.agent_mode
+            .clone()
+            .unwrap_or_else(|| if self.plan_mode { "plan" } else { "build" }.to_string())
+    }
+
+    fn begin_user_turn_snapshot(&mut self) {
+        self.turn_metadata.push(TurnMetadata {
+            submitted_at: Some(format_turn_time_label()),
+            model_name: Some(self.model_name.clone()),
+            agent_mode: Some(self.current_agent_mode_snapshot()),
+            duration: None,
+            interrupted: false,
+        });
+    }
+
+    fn sync_turn_metadata_to_messages(&mut self) {
+        let user_count = self
+            .messages
+            .iter()
+            .filter(|msg| msg.role == Role::User)
+            .count();
+
+        if self.turn_metadata.len() > user_count {
+            self.turn_metadata.truncate(user_count);
+            return;
+        }
+
+        while self.turn_metadata.len() < user_count {
+            self.turn_metadata.push(TurnMetadata::default());
+        }
+    }
+
+    fn complete_current_turn_snapshot(&mut self, interrupted: bool) {
+        if let Some(index) = self.current_user_turn_index() {
+            if self.turn_metadata.len() <= index {
+                self.sync_turn_metadata_to_messages();
+            }
+
+            let model_name = self.model_name.clone();
+            let agent_mode = self.current_agent_mode_snapshot();
+            if let Some(meta) = self.turn_metadata.get_mut(index) {
+                meta.duration = self.last_turn_elapsed.clone();
+                meta.interrupted = interrupted;
+                if meta.model_name.is_none() {
+                    meta.model_name = Some(model_name);
+                }
+                if meta.agent_mode.is_none() {
+                    meta.agent_mode = Some(agent_mode);
+                }
+            }
+        }
+    }
+
+    fn flush_streamed_assistant_message(&mut self) {
+        if self.streaming_text.trim().is_empty() && self.streaming_thinking.trim().is_empty() {
+            self.streaming_text.clear();
+            self.streaming_thinking.clear();
+            return;
+        }
+
+        let thinking = std::mem::take(&mut self.streaming_thinking);
+        let text = std::mem::take(&mut self.streaming_text);
+
+        let mut blocks = Vec::new();
+        if !thinking.trim().is_empty() {
+            blocks.push(ContentBlock::Thinking {
+                thinking,
+                signature: String::new(),
+            });
+        }
+        if !text.is_empty() {
+            blocks.push(ContentBlock::Text { text });
+        }
+
+        let msg = match blocks.len() {
+            0 => return,
+            1 => match blocks.pop().unwrap() {
+                ContentBlock::Text { text } => Message::assistant(text),
+                block => Message::assistant_blocks(vec![block]),
+            },
+            _ => Message::assistant_blocks(blocks),
+        };
+
+        self.messages.push(msg);
+        self.invalidate_transcript();
+        self.on_new_message();
     }
 
     fn display_default_model_for_provider(&self, provider_id: &str) -> String {
@@ -1221,6 +1380,30 @@ impl App {
         self.model_name = model;
     }
 
+    /// Cycle to the next agent mode: build → plan → explore → build.
+    /// Sets `agent_mode_changed` so the main loop can update the query config
+    /// and tool list accordingly.
+    pub fn cycle_agent_mode(&mut self) {
+        const MODES: &[&str] = &["build", "plan", "explore"];
+        let current = self.agent_mode.as_deref().unwrap_or("build");
+        let idx = MODES.iter().position(|&m| m == current).unwrap_or(0);
+        let next = MODES[(idx + 1) % MODES.len()];
+        self.agent_mode = Some(next.to_string());
+        self.agent_mode_changed = true;
+        self.accent_color = accent_for_mode(Some(next));
+
+        // Sync plan_mode flag for legacy code paths
+        self.plan_mode = next == "plan";
+
+        let label = match next {
+            "build" => "Build",
+            "plan" => "Plan",
+            "explore" => "Explore",
+            other => other,
+        };
+        self.status_message = Some(format!("Switched to {} mode.", label));
+    }
+
     /// Update the active model name (also updates config + cost tracker).
     pub fn set_model(&mut self, model: String) {
         self.cost_tracker.set_model(&model);
@@ -1246,6 +1429,33 @@ impl App {
         settings.config.theme = self.config.theme.clone();
         let _ = settings.save_sync();
         self.status_message = Some(format!("Theme set to: {}", theme_name));
+    }
+
+    pub fn apply_provider_refresh(
+        &mut self,
+        config: Config,
+        provider_registry: Option<std::sync::Arc<claurst_api::ProviderRegistry>>,
+        auth_store: claurst_core::AuthStore,
+        has_credentials: bool,
+        status_message: String,
+    ) {
+        self.close_secondary_views();
+        self.config = config;
+        self.provider_registry = provider_registry;
+        self.model_registry = claurst_api::ModelRegistry::new();
+        self.auth_store = auth_store;
+        self.connect_dialog = DialogSelectState::new("Connect a provider", provider_picker_items());
+        self.model_picker = ModelPickerState::new();
+        self.key_input_dialog = crate::key_input_dialog::KeyInputDialogState::new();
+        self.device_auth_dialog = crate::device_auth_dialog::DeviceAuthDialogState::new();
+        self.device_auth_pending = None;
+        self.model_picker_fetch_pending = false;
+        self.has_credentials = has_credentials;
+        self.fast_mode = false;
+        self.model_name = self.config.effective_model().to_string();
+        self.cost_tracker.set_model(&self.model_name);
+        self.status_message = Some(status_message);
+        self.clear_prompt();
     }
 
     /// Handle slash commands that should open UI screens rather than execute
@@ -1333,6 +1543,7 @@ impl App {
             }
             "session" | "resume" => {
                 self.session_browser.open(vec![]);
+                self.session_list_pending = true;
                 true
             }
             "clear" => {
@@ -1340,7 +1551,9 @@ impl App {
                 self.system_annotations.clear();
                 self.display_messages.clear();
                 self.streaming_text.clear();
+                self.streaming_thinking.clear();
                 self.tool_use_blocks.clear();
+                self.turn_metadata.clear();
                 self.invalidate_transcript();
                 self.status_message = Some("Conversation cleared.".to_string());
                 true
@@ -1476,6 +1689,7 @@ impl App {
             }
             "rename" => {
                 self.session_browser.open(vec![]);
+                self.session_list_pending = true;
                 self.session_browser.start_rename();
                 true
             }
@@ -1715,6 +1929,9 @@ impl App {
             Role::User => Message::user(text),
             Role::Assistant => Message::assistant(text),
         };
+        if role == Role::User {
+            self.begin_user_turn_snapshot();
+        }
         self.messages.push(msg);
         self.invalidate_transcript();
         self.on_new_message();
@@ -1722,11 +1939,16 @@ impl App {
 
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
+        self.sync_turn_metadata_to_messages();
         self.invalidate_transcript();
     }
 
     pub fn push_message(&mut self, message: Message) {
+        if message.role == Role::User {
+            self.begin_user_turn_snapshot();
+        }
         self.messages.push(message);
+        self.sync_turn_metadata_to_messages();
         self.invalidate_transcript();
         self.on_new_message();
     }
@@ -2045,6 +2267,12 @@ impl App {
         let mut settings = claurst_core::config::Settings::load_sync()?;
         settings.has_completed_onboarding = true;
         settings.save_sync()
+    }
+
+    /// Public wrapper so the main loop can mark onboarding complete without
+    /// going through the dialog flow.
+    pub fn persist_onboarding_complete_pub() -> anyhow::Result<()> {
+        Self::persist_onboarding_complete()
     }
 
     /// Process a keyboard event. Returns `true` when the input should be
@@ -2875,6 +3103,7 @@ impl App {
                     self.is_streaming = false;
                     self.spinner_verb = None;
                     self.streaming_text.clear();
+                    self.streaming_thinking.clear();
                     self.tool_use_blocks.clear();
                     self.status_message = Some("Cancelled.".to_string());
                 } else {
@@ -2997,11 +3226,15 @@ impl App {
             }
             KeyCode::Tab if !self.is_streaming => {
                 if !self.prompt_input.suggestions.is_empty() {
+                    // Accept slash-command suggestion
                     if self.prompt_input.suggestion_index.is_none() {
                         self.prompt_input.suggestion_index = Some(0);
                     }
                     self.prompt_input.accept_suggestion();
                     self.refresh_prompt_input();
+                } else if self.prompt_input.is_empty() {
+                    // Cycle agent mode: build → plan → explore → build
+                    self.cycle_agent_mode();
                 }
             }
 
@@ -3427,6 +3660,7 @@ impl App {
                     self.is_streaming = false;
                     self.spinner_verb = None;
                     self.streaming_text.clear();
+                    self.streaming_thinking.clear();
                     self.tool_use_blocks.clear();
                     self.status_message = Some("Cancelled.".to_string());
                 } else {
@@ -3682,6 +3916,22 @@ impl App {
             "sendMessage" => {
                 // Ctrl+M: Send message (alternative to Enter)
                 !self.is_streaming
+            }
+            "indent" => {
+                // Tab: cycle agent mode when prompt is empty, accept
+                // slash-command suggestion otherwise.
+                if !self.is_streaming {
+                    if !self.prompt_input.suggestions.is_empty() {
+                        if self.prompt_input.suggestion_index.is_none() {
+                            self.prompt_input.suggestion_index = Some(0);
+                        }
+                        self.prompt_input.accept_suggestion();
+                        self.refresh_prompt_input();
+                    } else if self.prompt_input.is_empty() {
+                        self.cycle_agent_mode();
+                    }
+                }
+                false
             }
             _ => false,
         }
@@ -4112,8 +4362,34 @@ impl App {
 
             // ---- Text selection / focus routing -------------------------
             MouseEventKind::Down(MouseButton::Left) => {
-                // Dismiss context menu on left click
-                self.dismiss_context_menu();
+                // If a context menu is open, check if the click is on a menu item.
+                if let Some(menu) = self.context_menu_state {
+                    let items = Self::context_menu_items(menu.kind);
+                    let item_labels: Vec<&str> = items.iter().map(|i| match i {
+                        ContextMenuItem::Copy => "Copy",
+                        ContextMenuItem::Fork => "Fork new chat",
+                    }).collect();
+                    let menu_width = item_labels.iter().map(|l| l.len()).max().unwrap_or(4) + 4;
+                    let col = mouse_event.column;
+                    let row = mouse_event.row;
+                    // Inner area starts 1 past the border
+                    let inner_y = menu.y + 1;
+                    if col >= menu.x
+                        && col < menu.x.saturating_add(menu_width as u16)
+                        && row >= inner_y
+                        && row < inner_y.saturating_add(items.len() as u16)
+                    {
+                        let clicked_index = (row - inner_y) as usize;
+                        if clicked_index < items.len() {
+                            self.context_menu_state.as_mut().unwrap().selected_index = clicked_index;
+                            self.execute_context_menu_item();
+                            return;
+                        }
+                    }
+                    // Click was outside the menu — just dismiss it
+                    self.dismiss_context_menu();
+                    return;
+                }
 
                 let input_area = self.last_input_area.get();
                 let selectable_area = self.last_selectable_area.get();
@@ -4226,9 +4502,17 @@ impl App {
                 if !self.is_streaming {
                     let seed = self.frame_count as usize ^ (self.messages.len() * 17);
                     self.spinner_verb = Some(sample_spinner_verb(seed).to_string());
-                    self.turn_start = Some(std::time::Instant::now());
-                    self.last_turn_elapsed = None;
-                    self.last_turn_verb = None;
+                    // Only set turn_start on the FIRST streaming event of a
+                    // turn.  MessageStop resets is_streaming between tool-use
+                    // cycles, but we must not reset the timer — the total turn
+                    // duration should cover the entire request, including all
+                    // tool-use rounds.
+                    if self.turn_start.is_none() {
+                        self.turn_start = Some(std::time::Instant::now());
+                        self.last_turn_elapsed = None;
+                        self.last_turn_verb = None;
+                    }
+                    self.streaming_thinking.clear();
                 }
                 self.is_streaming = true;
                 match stream_evt {
@@ -4242,6 +4526,8 @@ impl App {
                             }
                             claurst_api::streaming::ContentDelta::ThinkingDelta { thinking } => {
                                 debug!(len = thinking.len(), "Thinking delta received");
+                                self.streaming_thinking.push_str(&thinking);
+                                self.invalidate_transcript();
                             }
                             _ => {}
                         }
@@ -4250,10 +4536,7 @@ impl App {
                         self.is_streaming = false;
                         self.spinner_verb = None;
                         self.stall_start = None;
-                        if !self.streaming_text.is_empty() {
-                            let text = std::mem::take(&mut self.streaming_text);
-                            self.push_assistant_message(text);
-                        }
+                        self.flush_streamed_assistant_message();
                     }
                     _ => {
                         // Any other stream event: if we have no stall_start yet,
@@ -4272,9 +4555,11 @@ impl App {
                 }
                 self.is_streaming = true;
                 self.status_message = Some(format!("Running {}…", tool_name));
+                let turn_index = self.current_user_turn_index();
                 if let Some(existing) =
                     self.tool_use_blocks.iter_mut().find(|b| b.id == tool_id)
                 {
+                    existing.turn_index = turn_index;
                     existing.status = ToolStatus::Running;
                     existing.output_preview = None;
                     existing.input_json = input_json;
@@ -4282,6 +4567,7 @@ impl App {
                     self.tool_use_blocks.push(ToolUseBlock {
                         id: tool_id,
                         name: tool_name,
+                        turn_index,
                         status: ToolStatus::Running,
                         output_preview: None,
                         input_json,
@@ -4328,17 +4614,16 @@ impl App {
                 self.is_streaming = false;
                 self.spinner_verb = None;
                 // Record elapsed time and pick a completion verb
-                if let Some(start) = self.turn_start.take() {
-                    let secs = start.elapsed().as_secs();
-                    let seed = self.frame_count as usize ^ (self.messages.len() * 7);
-                    self.last_turn_elapsed = Some(format_elapsed(secs));
-                    self.last_turn_verb = Some(sample_completion_verb(seed));
-                }
-                if !self.streaming_text.is_empty() {
-                    let text = std::mem::take(&mut self.streaming_text);
-                    self.push_assistant_message(text);
-                }
+                let seed = self.frame_count as usize ^ (self.messages.len() * 7);
+                let elapsed = self.turn_start.take()
+                    .map(|start| format_elapsed_ms(start.elapsed().as_millis()));
+                self.last_turn_elapsed = Some(
+                    elapsed.unwrap_or_else(|| "0s".to_string())
+                );
+                self.last_turn_verb = Some(sample_completion_verb(seed));
+                self.flush_streamed_assistant_message();
                 self.tool_use_blocks.retain(|b| b.status != ToolStatus::Running);
+                self.complete_current_turn_snapshot(stop_reason.contains("abort") || stop_reason.contains("cancel"));
                 self.invalidate_transcript();
                 self.refresh_turn_diff_from_history();
             }
@@ -4351,6 +4636,7 @@ impl App {
                 self.is_streaming = false;
                 self.spinner_verb = None;
                 self.streaming_text.clear();
+                self.streaming_thinking.clear();
                 self.invalidate_transcript();
                 let err_msg = format!("Error: {}", msg);
                 self.push_assistant_message(err_msg.clone());
@@ -4416,7 +4702,11 @@ impl App {
             if let Some(ref mut rx) = self.model_fetch_rx {
                 match rx.try_recv() {
                     Ok(Ok(entries)) => {
-                        let provider = self.config.provider.as_deref().unwrap_or("anthropic");
+                        let provider = self
+                            .config
+                            .provider
+                            .clone()
+                            .unwrap_or_else(|| "anthropic".to_string());
                         let provider_prefix = format!("{}/", provider);
                         let current = self
                             .model_name
@@ -4474,6 +4764,55 @@ impl App {
                         });
                     }
                 }
+            }
+
+            // Drain background session-list results.
+            if let Some(ref mut rx) = self.session_list_rx {
+                match rx.try_recv() {
+                    Ok(entries) => {
+                        self.session_browser.sessions = entries;
+                        self.session_browser.selected_idx = 0;
+                        self.session_list_rx = None;
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        self.session_list_rx = None;
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                }
+            }
+
+            // Spawn async session-list load when requested.
+            if self.session_list_pending {
+                self.session_list_pending = false;
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                self.session_list_rx = Some(rx);
+                tokio::spawn(async move {
+                    let sessions = claurst_core::history::list_sessions().await;
+                    let entries: Vec<crate::session_browser::SessionEntry> = sessions
+                        .into_iter()
+                        .map(|s| {
+                            let age = chrono::Utc::now()
+                                .signed_duration_since(s.updated_at);
+                            let last_updated = if age.num_minutes() < 1 {
+                                "just now".to_string()
+                            } else if age.num_hours() < 1 {
+                                format!("{}m ago", age.num_minutes())
+                            } else if age.num_hours() < 24 {
+                                format!("{}h ago", age.num_hours())
+                            } else {
+                                format!("{}d ago", age.num_days())
+                            };
+                            crate::session_browser::SessionEntry {
+                                id: s.id,
+                                title: s.title.unwrap_or_else(|| "(untitled)".to_string()),
+                                last_updated,
+                                message_count: s.messages.len(),
+                                cost_usd: s.total_cost,
+                            }
+                        })
+                        .collect();
+                    let _ = tx.send(entries).await;
+                });
             }
 
             // Drain voice transcription events (non-blocking).

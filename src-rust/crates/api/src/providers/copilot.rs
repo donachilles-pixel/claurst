@@ -198,6 +198,17 @@ impl CopilotProvider {
         major.parse::<u32>().map(|value| value >= 5).unwrap_or(false)
     }
 
+    /// Check whether a provider error indicates the model/endpoint is
+    /// unsupported and a fallback to Chat Completions is worth trying.
+    fn is_responses_api_fallback_candidate(err: &ProviderError) -> bool {
+        matches!(
+            err,
+            ProviderError::InvalidRequest { .. }
+                | ProviderError::ModelNotFound { .. }
+                | ProviderError::Other { status: Some(400..=499), .. }
+        )
+    }
+
     fn system_prompt_to_text(request: &ProviderRequest) -> Option<String> {
         request.system_prompt.as_ref().map(|prompt| match prompt {
             crate::provider_types::SystemPrompt::Text(text) => text.clone(),
@@ -842,7 +853,15 @@ impl LlmProvider for CopilotProvider {
         request: ProviderRequest,
     ) -> Result<ProviderResponse, ProviderError> {
         if Self::use_responses_api(&request.model) {
-            return self.send_responses_non_streaming(&request).await;
+            match self.send_responses_non_streaming(&request).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) if Self::is_responses_api_fallback_candidate(&e) => {
+                    // Responses API rejected the model — fall back to Chat Completions.
+                    // Some OAuth apps / Copilot plans only expose models via /chat/completions.
+                    debug!(model = %request.model, error = %e, "Responses API rejected, falling back to Chat Completions");
+                }
+                Err(e) => return Err(e),
+            }
         }
         self.send_non_streaming(&request).await
     }
@@ -853,8 +872,13 @@ impl LlmProvider for CopilotProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
     {
         if Self::use_responses_api(&request.model) {
-            let response = self.send_responses_non_streaming(&request).await?;
-            return Ok(self.stream_synthetic_response(response));
+            match self.send_responses_non_streaming(&request).await {
+                Ok(response) => return Ok(self.stream_synthetic_response(response)),
+                Err(e) if Self::is_responses_api_fallback_candidate(&e) => {
+                    debug!(model = %request.model, error = %e, "Responses API rejected, falling back to Chat Completions");
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         let resp = self.do_streaming(&request).await?;
