@@ -52,6 +52,10 @@ pub struct ProviderQuirks {
     /// Override the sampling temperature when the request does not specify one.
     pub default_temperature: Option<f64>,
 
+    /// Force a provider-required temperature even when the request specified
+    /// another value. Some models reject every other temperature.
+    pub fixed_temperature: Option<f64>,
+
     /// Some providers (e.g. older Mistral releases) reject a message sequence
     /// that goes …tool_result → user… without an intervening assistant turn.
     /// When `true`, an `{"role":"assistant","content":"Done."}` message is
@@ -235,6 +239,7 @@ impl OpenAiCompatProvider {
             request.system_prompt.as_ref(),
         );
 
+        self.apply_assistant_reasoning_history(&request.messages, &mut messages);
         self.apply_tool_id_quirks(&mut messages);
 
         if self.quirks.fix_tool_user_sequence {
@@ -244,10 +249,68 @@ impl OpenAiCompatProvider {
         messages
     }
 
-    /// Resolve the temperature to use: request value takes priority, then
-    /// the quirk default, then nothing (let the API default apply).
+    /// Resolve the temperature to use: a provider-required fixed value takes
+    /// priority, then the request value, then the quirk default.
     fn resolve_temperature(&self, request: &ProviderRequest) -> Option<f64> {
-        request.temperature.or(self.quirks.default_temperature)
+        self.quirks
+            .fixed_temperature
+            .or(request.temperature)
+            .or(self.quirks.default_temperature)
+    }
+
+    fn apply_assistant_reasoning_history(
+        &self,
+        source_messages: &[claurst_core::types::Message],
+        wire_messages: &mut [Value],
+    ) {
+        let Some(field) = self.quirks.reasoning_field.as_deref() else {
+            return;
+        };
+
+        let mut wire_idx = 0usize;
+        for source in source_messages {
+            if source.role != claurst_core::types::Role::Assistant {
+                continue;
+            }
+
+            while wire_idx < wire_messages.len() {
+                let is_assistant = wire_messages[wire_idx]
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    == Some("assistant");
+                if is_assistant {
+                    if let Some(reasoning) = Self::assistant_reasoning_content(&source.content) {
+                        if let Some(obj) = wire_messages[wire_idx].as_object_mut() {
+                            obj.insert(field.to_string(), json!(reasoning));
+                        }
+                    }
+                    wire_idx += 1;
+                    break;
+                }
+                wire_idx += 1;
+            }
+        }
+    }
+
+    fn assistant_reasoning_content(
+        content: &claurst_core::types::MessageContent,
+    ) -> Option<String> {
+        let claurst_core::types::MessageContent::Blocks(blocks) = content else {
+            return None;
+        };
+
+        let reasoning = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Thinking { thinking, .. } if !thinking.is_empty() => {
+                    Some(thinking.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+
+        (!reasoning.is_empty()).then_some(reasoning)
     }
 
     /// Attach the authorization header if an API key is configured.
@@ -1003,19 +1066,35 @@ impl LlmProvider for OpenAiCompatProvider {
             .iter()
             .filter_map(|m| {
                 let id = m.get("id").and_then(|v| v.as_str())?;
+                let name = m
+                    .get("display_name")
+                    .or_else(|| m.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(id);
+                let context_window = m
+                    .get("context_length")
+                    .or_else(|| m.get("context_window"))
+                    .and_then(|v| v.as_u64())
+                    .map(|value| value as u32)
+                    .unwrap_or_else(|| match id {
+                        "gpt-5" | "gpt-5.4" | "gpt-5.2" | "gpt-5-mini" | "gpt-5-nano"
+                        | "gpt-5-chat-latest" | "gpt-5.2-codex" | "gpt-5.1-codex"
+                        | "gpt-5.1-codex-mini" | "gpt-5.1-codex-max" => 400_000,
+                        "o3" | "o3-mini" | "o4-mini" => 200_000,
+                        _ => 128_000,
+                    });
+                let max_output_tokens = m
+                    .get("max_output_tokens")
+                    .or_else(|| m.get("max_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .map(|value| value as u32)
+                    .unwrap_or(16_384);
                 Some(ModelInfo {
                     id: ModelId::new(id),
                     provider_id: provider_id.clone(),
-                    name: id.to_string(),
-                    context_window: match id {
-                        "gpt-5" | "gpt-5.4" | "gpt-5.2" | "gpt-5-mini" | "gpt-5-nano"
-                        | "gpt-5-chat-latest"
-                        | "gpt-5.2-codex" | "gpt-5.1-codex" | "gpt-5.1-codex-mini"
-                        | "gpt-5.1-codex-max" => 400_000,
-                        "o3" | "o3-mini" | "o4-mini" => 200_000,
-                        _ => 128_000,
-                    },
-                    max_output_tokens: 16_384,
+                    name: name.to_string(),
+                    context_window,
+                    max_output_tokens,
                 })
             })
             .collect();
@@ -1110,5 +1189,80 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[1]["role"], json!("assistant"));
         assert_eq!(messages[1]["content"], json!("Done."));
+    }
+
+    #[test]
+    fn fixed_temperature_overrides_request_temperature() {
+        let provider = OpenAiCompatProvider::new("kimi-for-coding", "Kimi", "https://example.com")
+            .with_quirks(ProviderQuirks {
+                default_temperature: Some(0.3),
+                fixed_temperature: Some(0.6),
+                ..Default::default()
+            });
+        let request = ProviderRequest {
+            model: "kimi-for-coding".to_string(),
+            messages: vec![],
+            system_prompt: None,
+            tools: vec![],
+            max_tokens: 1024,
+            temperature: Some(0.0),
+            top_p: None,
+            top_k: None,
+            stop_sequences: vec![],
+            thinking: None,
+            provider_options: Value::Null,
+        };
+
+        assert_eq!(provider.resolve_temperature(&request), Some(0.6));
+    }
+
+    #[test]
+    fn reasoning_field_preserves_assistant_thinking_history() {
+        let provider = OpenAiCompatProvider::new("kimi-for-coding", "Kimi", "https://example.com")
+            .with_quirks(ProviderQuirks {
+                reasoning_field: Some("reasoning_content".to_string()),
+                ..Default::default()
+            });
+        let request = ProviderRequest {
+            model: "kimi-for-coding".to_string(),
+            messages: vec![
+                claurst_core::types::Message {
+                    role: claurst_core::types::Role::User,
+                    content: claurst_core::types::MessageContent::Text("solve it".to_string()),
+                    uuid: None,
+                    cost: None,
+                },
+                claurst_core::types::Message {
+                    role: claurst_core::types::Role::Assistant,
+                    content: claurst_core::types::MessageContent::Blocks(vec![
+                        ContentBlock::Thinking {
+                            thinking: "reasoned".to_string(),
+                            signature: String::new(),
+                        },
+                        ContentBlock::Text {
+                            text: "done".to_string(),
+                        },
+                    ]),
+                    uuid: None,
+                    cost: None,
+                },
+            ],
+            system_prompt: None,
+            tools: vec![],
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: vec![],
+            thinking: None,
+            provider_options: Value::Null,
+        };
+
+        let messages = provider.build_messages(&request);
+        let assistant = messages
+            .iter()
+            .find(|message| message["role"] == json!("assistant"))
+            .expect("assistant message");
+        assert_eq!(assistant["reasoning_content"], json!("reasoned"));
     }
 }

@@ -245,6 +245,8 @@ fn is_openaiish_provider(provider_id: &str) -> bool {
             | "siliconflow"
             | "sambanova"
             | "moonshot"
+            | "kimi-for-coding"
+            | "kimi-code"
             | "zhipu"
             | "zai"
             | "qwen"
@@ -377,6 +379,18 @@ fn build_provider_options(
                 serde_json::json!("low"),
             );
         }
+    }
+
+    if (provider_id == "kimi-for-coding" || provider_id == "kimi-code")
+        && model_id == "kimi-for-coding"
+    {
+        let reasoning_effort = effort_level
+            .map(reasoning_effort_for_level)
+            .unwrap_or("medium");
+        options.insert(
+            "reasoningEffort".to_string(),
+            serde_json::json!(reasoning_effort),
+        );
     }
 
     if provider_id == "openrouter" {
@@ -919,6 +933,7 @@ pub async fn run_query_loop(
                     // Additional OpenAI-compat providers
                     "qwen", "siliconflow",
                     "moonshot", "moonshotai",
+                    "kimi-for-coding", "kimi-code",
                     "zhipu", "zhipuai",
                     "zai",
                     "nebius", "novita", "ovhcloud", "scaleway",
@@ -2298,6 +2313,17 @@ mod tests {
         assert_eq!(options["reasoningEffort"], serde_json::json!("medium"));
         assert_eq!(options["textVerbosity"], serde_json::json!("low"));
         assert_eq!(options["usage"]["include"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_build_provider_options_for_kimi_for_coding() {
+        let options = build_provider_options(
+            "kimi-for-coding",
+            "kimi-for-coding",
+            Some(claurst_core::effort::EffortLevel::Medium),
+            None,
+        );
+        assert_eq!(options["reasoningEffort"], serde_json::json!("medium"));
     }
 
     #[test]

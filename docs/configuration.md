@@ -325,6 +325,7 @@ via the `provider` key in settings or the `--provider` CLI flag.
 | `groq` | `llama-3.3-70b-versatile` |
 | `cerebras` | `llama-3.3-70b` |
 | `deepseek` | `deepseek-chat` |
+| `kimi-for-coding` | `kimi-for-coding` |
 | `mistral` | `mistral-large-latest` |
 | `xai` | `grok-2` |
 | `openrouter` | `anthropic/claude-sonnet-4` |
@@ -394,6 +395,9 @@ and `api_base` override the corresponding environment variables.
 | `MISTRAL_API_KEY` | API key for the `mistral` provider. |
 | `OPENROUTER_API_KEY` | API key for the `openrouter` provider. |
 | `DEEPSEEK_API_KEY` | API key for the `deepseek` provider. |
+| `KIMI_FOR_CODING_API_KEY` | API key for the `kimi-for-coding` provider. `KIMI_CODE_API_KEY` and `KIMICODE_API_KEY` are also accepted. |
+| `KIMI_FOR_CODING_BASE_URL` | Override the Kimi For Coding base URL. Defaults to `https://api.kimi.com/coding/v1`. |
+| `KIMI_FOR_CODING_USER_AGENT` | Override the User-Agent sent to Kimi For Coding. Defaults to `claude-code/1.0.0`. |
 | `COHERE_API_KEY` | API key for the `cohere` provider. |
 | `DEEPINFRA_API_KEY` | API key for the `deepinfra` provider. |
 | `VENICE_API_KEY` | API key for the `venice` provider. |

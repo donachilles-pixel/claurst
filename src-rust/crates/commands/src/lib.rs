@@ -119,6 +119,7 @@ fn provider_lookup_ids(provider_id: &str) -> Vec<&str> {
             vec!["llamacpp", "llama-cpp", "llama-server"]
         }
         "moonshot" | "moonshotai" => vec!["moonshot", "moonshotai"],
+        "kimi-for-coding" | "kimi-code" => vec!["kimi-for-coding", "kimi-code"],
         "zhipu" | "zhipuai" => vec!["zhipu", "zhipuai"],
         "vultr" | "vultr-ai" => vec!["vultr", "vultr-ai"],
         "google" | "google-vertex" => vec!["google", "google-vertex"],

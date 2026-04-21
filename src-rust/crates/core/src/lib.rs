@@ -645,6 +645,9 @@ pub mod config {
             "alibaba" | "qwen" => &["DASHSCOPE_API_KEY"],
             "venice" => &["VENICE_API_KEY"],
             "moonshot" | "moonshotai" => &["MOONSHOT_API_KEY"],
+            "kimi-for-coding" | "kimi-code" => {
+                &["KIMI_FOR_CODING_API_KEY", "KIMI_CODE_API_KEY", "KIMICODE_API_KEY"]
+            }
             "zhipu" | "zhipuai" => &["ZHIPU_API_KEY"],
             "zai" => &["ZAI_API_KEY"],
             "siliconflow" => &["SILICONFLOW_API_KEY"],
@@ -681,6 +684,7 @@ pub mod config {
             "ollama" => Some("OLLAMA_HOST"),
             "lmstudio" | "lm-studio" => Some("LM_STUDIO_HOST"),
             "llamacpp" | "llama-cpp" | "llama-server" => Some("LLAMA_CPP_HOST"),
+            "kimi-for-coding" | "kimi-code" => Some("KIMI_FOR_CODING_BASE_URL"),
             _ => None,
         }
     }
@@ -693,6 +697,7 @@ pub mod config {
             "ollama" => Some("http://localhost:11434"),
             "lmstudio" | "lm-studio" => Some("http://localhost:1234"),
             "llamacpp" | "llama-cpp" | "llama-server" => Some("http://localhost:8080"),
+            "kimi-for-coding" | "kimi-code" => Some("https://api.kimi.com/coding/v1"),
             _ => None,
         }
     }
@@ -1167,6 +1172,7 @@ pub mod config {
                 Some("lmstudio") => "default",
                 Some("llamacpp") => "default",
                 Some("custom-openai") => "default",
+                Some("kimi-for-coding") | Some("kimi-code") => "kimi-for-coding",
                 Some("azure") => "gpt-4o",
                 Some("amazon-bedrock") => "anthropic.claude-sonnet-4-6-v1",
                 Some("venice") => "llama-3.3-70b",

@@ -369,6 +369,40 @@ OpenAI-compatible API with extended reasoning output via a `reasoning_content` f
 
 ---
 
+### Kimi For Coding
+
+Dedicated Kimi Code / Kimi For Coding endpoint for coding agents. This is separate from the general Kimi API and separate from the Moonshot AI Open Platform API.
+
+**Authentication:** `KIMI_FOR_CODING_API_KEY` environment variable. `KIMI_CODE_API_KEY` and `KIMICODE_API_KEY` are accepted aliases.
+
+**Base URL:** `https://api.kimi.com/coding/v1`
+
+**Default model:** `kimi-for-coding`
+
+**User-Agent:** Defaults to `claude-code/1.0.0` for Kimi Code's coding-agent gate. Override with `KIMI_FOR_CODING_USER_AGENT` if needed.
+
+**Configuration:**
+
+```json
+{
+  "provider": "kimi-for-coding",
+  "providers": {
+    "kimi-for-coding": {
+      "api_key": "sk-kimi-...",
+      "api_base": "https://api.kimi.com/coding/v1"
+    }
+  }
+}
+```
+
+Run it directly:
+
+```
+KIMI_FOR_CODING_API_KEY=sk-kimi-... claurst --provider kimi-for-coding --model kimi-for-coding "review this code"
+```
+
+---
+
 ### Mistral AI
 
 OpenAI-compatible API with Mistral-specific protocol quirks (tool call ID formatting, tool-user sequence injection).

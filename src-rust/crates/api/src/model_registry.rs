@@ -85,6 +85,7 @@ impl ModelRegistry {
         self.add_anthropic_models();
         self.add_openai_models();
         self.add_google_models();
+        self.add_kimi_for_coding_models();
         self.add_zai_models();
     }
 
@@ -171,6 +172,28 @@ impl ModelRegistry {
                 status: "active".to_string(),
             });
         }
+    }
+
+    fn add_kimi_for_coding_models(&mut self) {
+        let pid = ProviderId::new(ProviderId::KIMI_FOR_CODING);
+        self.insert(ModelEntry {
+            info: ModelInfo {
+                id: ModelId::new("kimi-for-coding"),
+                provider_id: pid,
+                name: "Kimi For Coding".to_string(),
+                context_window: 262_144,
+                max_output_tokens: 32_768,
+            },
+            cost_input: None,
+            cost_output: None,
+            cost_cache_read: None,
+            cost_cache_write: None,
+            tool_calling: true,
+            reasoning: true,
+            vision: true,
+            family: Some("kimi-code".to_string()),
+            status: "active".to_string(),
+        });
     }
 
     // Z.AI pricing per docs.z.ai/guides/overview/pricing — USD per 1M tokens.
@@ -266,6 +289,8 @@ impl ModelRegistry {
             Some("perplexity")
         } else if model_name.starts_with("glm-") {
             Some("zai")
+        } else if model_name == "kimi-for-coding" {
+            Some(ProviderId::KIMI_FOR_CODING)
         } else {
             None
         };
@@ -331,6 +356,7 @@ impl ModelRegistry {
             "command-r-plus",
             "llama-3.3-70b",
             "sonar-pro",
+            "kimi-for-coding",
             "glm-5.1",
             "glm-5-turbo",
         ];

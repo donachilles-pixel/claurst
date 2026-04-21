@@ -18,10 +18,10 @@ pub use openai_compat::OpenAiCompatProvider;
 
 pub mod openai_compat_providers;
 pub use openai_compat_providers::{
-    baseten, cerebras, deepinfra, deepseek, fireworks, friendli, groq, huggingface, llama_cpp,
-    lm_studio, mistral, moonshot, nebius, novita, nvidia, ollama, openrouter, ovhcloud, perplexity,
-    qwen, sambanova, scaleway, siliconflow, stepfun, together_ai, upstage, venice, vultr_ai, xai,
-    zai, zhipu,
+    baseten, cerebras, deepinfra, deepseek, fireworks, friendli, groq, huggingface,
+    kimi_for_coding, llama_cpp, lm_studio, mistral, moonshot, nebius, novita, nvidia, ollama,
+    openrouter, ovhcloud, perplexity, qwen, sambanova, scaleway, siliconflow, stepfun,
+    together_ai, upstage, venice, vultr_ai, xai, zai, zhipu,
 };
 
 pub mod cohere;

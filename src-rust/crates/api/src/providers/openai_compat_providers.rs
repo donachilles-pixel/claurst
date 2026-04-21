@@ -32,6 +32,8 @@ pub fn provider_for_id(provider_id: &str) -> Option<OpenAiCompatProvider> {
         "nvidia" => Some(nvidia()),
         "siliconflow" => Some(siliconflow()),
         "moonshot" | "moonshotai" => Some(moonshot()),
+        "kimi-for-coding" => Some(kimi_for_coding()),
+        "kimi-code" => Some(kimi_for_coding_with_id("kimi-code")),
         "zhipu" | "zhipuai" => Some(zhipu()),
         "zai" => Some(zai()),
         "nebius" => Some(nebius()),
@@ -346,6 +348,60 @@ pub fn moonshot() -> OpenAiCompatProvider {
         "https://api.moonshot.ai/v1",
     )
     .with_api_key(key)
+}
+
+fn kimi_for_coding_key() -> String {
+    ["KIMI_FOR_CODING_API_KEY", "KIMI_CODE_API_KEY", "KIMICODE_API_KEY"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .unwrap_or_default()
+}
+
+fn kimi_for_coding_base_url() -> String {
+    let base = std::env::var("KIMI_FOR_CODING_BASE_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "https://api.kimi.com/coding/v1".to_string());
+    let trimmed = base.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
+    }
+}
+
+fn kimi_for_coding_with_id(provider_id: impl Into<String>) -> OpenAiCompatProvider {
+    let user_agent = std::env::var("KIMI_FOR_CODING_USER_AGENT")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "claude-code/1.0.0".to_string());
+
+    OpenAiCompatProvider::new(
+        provider_id,
+        "Kimi For Coding",
+        kimi_for_coding_base_url(),
+    )
+    .with_api_key(kimi_for_coding_key())
+    .with_header("User-Agent", user_agent)
+    .with_quirks(ProviderQuirks {
+        reasoning_field: Some("reasoning_content".to_string()),
+        include_usage_in_stream: true,
+        fixed_temperature: Some(0.6),
+        overflow_patterns: vec![
+            "context length".to_string(),
+            "exceeded.*token".to_string(),
+        ],
+        ..Default::default()
+    })
+}
+
+/// Kimi For Coding / Kimi Code. Reads `KIMI_FOR_CODING_API_KEY`
+/// (`KIMI_CODE_API_KEY` and `KIMICODE_API_KEY` are accepted aliases).
+///
+/// This is the dedicated coding-agent endpoint, not the Moonshot/Kimi Open
+/// Platform API.
+pub fn kimi_for_coding() -> OpenAiCompatProvider {
+    kimi_for_coding_with_id(ProviderId::KIMI_FOR_CODING)
 }
 
 /// Zhipu AI / GLM.  Reads `ZHIPU_API_KEY`.

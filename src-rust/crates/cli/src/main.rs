@@ -2940,6 +2940,7 @@ fn provider_status_lookup_keys(provider_id: &str) -> Vec<&str> {
         "lmstudio" | "lm-studio" => vec!["lmstudio", "lm-studio"],
         "llamacpp" | "llama-cpp" | "llama-server" => vec!["llamacpp", "llama-cpp", "llama-server"],
         "moonshot" | "moonshotai" => vec!["moonshot", "moonshotai"],
+        "kimi-for-coding" | "kimi-code" => vec!["kimi-for-coding", "kimi-code"],
         "zhipu" | "zhipuai" => vec!["zhipu", "zhipuai"],
         "vultr" | "vultr-ai" => vec!["vultr", "vultr-ai"],
         "google" | "google-vertex" => vec!["google", "google-vertex"],
@@ -2954,6 +2955,7 @@ fn format_provider_name(provider_id: &str) -> String {
         "google" => "Google".to_string(),
         "google-vertex" => "Google Vertex".to_string(),
         "github-copilot" => "GitHub Copilot".to_string(),
+        "kimi-for-coding" | "kimi-code" => "Kimi For Coding".to_string(),
         "xai" => "xAI".to_string(),
         "lmstudio" | "lm-studio" => "LM Studio".to_string(),
         "llamacpp" | "llama-cpp" | "llama-server" => "llama.cpp".to_string(),
@@ -3212,4 +3214,3 @@ fn json_null_or_string(opt: &Option<String>) -> serde_json::Value {
         None => serde_json::Value::Null,
     }
 }
-

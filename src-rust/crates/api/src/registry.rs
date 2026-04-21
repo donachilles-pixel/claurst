@@ -188,6 +188,16 @@ pub fn provider_from_config(
             }
             Some(Arc::new(provider))
         }
+        "kimi-for-coding" | "kimi-code" => {
+            let mut provider = providers::openai_compat_providers::provider_for_id(provider_id)?;
+            if let Some(key) = api_key {
+                provider = provider.with_api_key(key);
+            }
+            if let Some(base) = api_base {
+                provider = provider.with_base_url(base);
+            }
+            Some(Arc::new(provider))
+        }
         "cohere" => api_key.map(|key| Arc::new(CohereProvider::new(key)) as Arc<dyn LlmProvider>),
         "github-copilot" => {
             api_key.map(|key| Arc::new(CopilotProvider::new(key)) as Arc<dyn LlmProvider>)
@@ -529,6 +539,12 @@ impl ProviderRegistry {
         }
         if std::env::var("MOONSHOT_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
             self.register(Arc::new(p::moonshot()));
+        }
+        if ["KIMI_FOR_CODING_API_KEY", "KIMI_CODE_API_KEY", "KIMICODE_API_KEY"]
+            .iter()
+            .any(|name| std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false))
+        {
+            self.register(Arc::new(p::kimi_for_coding()));
         }
         if std::env::var("ZHIPU_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
             self.register(Arc::new(p::zhipu()));

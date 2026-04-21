@@ -303,6 +303,7 @@ providers. Each provider looks for credentials in this order:
 | `groq` | `GROQ_API_KEY` |
 | `cerebras` | `CEREBRAS_API_KEY` |
 | `deepseek` | `DEEPSEEK_API_KEY` |
+| `kimi-for-coding` | `KIMI_FOR_CODING_API_KEY` (`KIMI_CODE_API_KEY` and `KIMICODE_API_KEY` aliases) |
 | `mistral` | `MISTRAL_API_KEY` |
 | `xai` | `XAI_API_KEY` |
 | `openrouter` | `OPENROUTER_API_KEY` |

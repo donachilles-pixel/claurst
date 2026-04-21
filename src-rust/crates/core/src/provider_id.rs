@@ -58,6 +58,7 @@ impl ProviderId {
     pub const NVIDIA: &'static str = "nvidia";
     pub const SILICONFLOW: &'static str = "siliconflow";
     pub const MOONSHOT: &'static str = "moonshotai";
+    pub const KIMI_FOR_CODING: &'static str = "kimi-for-coding";
     pub const ZHIPU: &'static str = "zhipuai";
     pub const ZAI: &'static str = "zai";
     pub const NEBIUS: &'static str = "nebius";

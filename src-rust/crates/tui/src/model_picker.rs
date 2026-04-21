@@ -321,6 +321,9 @@ pub fn models_for_provider(provider_id: &str) -> Vec<ModelEntry> {
             model_entry("deepseek-chat", "DeepSeek V3", "64K context"),
             model_entry("deepseek-reasoner", "DeepSeek R1", "64K context"),
         ],
+        "kimi-for-coding" | "kimi-code" => vec![
+            model_entry("kimi-for-coding", "Kimi For Coding", "262K context, 32K output"),
+        ],
         "mistral" => vec![
             model_entry("mistral-large-latest", "Mistral Large", "128K context"),
             model_entry("mistral-small-latest", "Mistral Small", "128K context"),
@@ -424,6 +427,8 @@ pub fn default_model_for_provider(provider_id: &str) -> String {
         "groq" => "groq/llama-3.3-70b-versatile".to_string(),
         "cerebras" => "cerebras/llama-3.3-70b".to_string(),
         "deepseek" => "deepseek/deepseek-chat".to_string(),
+        "kimi-for-coding" => "kimi-for-coding/kimi-for-coding".to_string(),
+        "kimi-code" => "kimi-code/kimi-for-coding".to_string(),
         "mistral" => "mistral/mistral-large-latest".to_string(),
         "xai" => "xai/grok-2".to_string(),
         "openrouter" => "openrouter/anthropic/claude-sonnet-4".to_string(),
@@ -1198,6 +1203,13 @@ mod tests {
         let models = models_for_provider("ollama");
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert!(ids.contains(&"llama3.2"));
+    }
+
+    #[test]
+    fn models_for_provider_kimi_for_coding() {
+        let models = models_for_provider("kimi-for-coding");
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["kimi-for-coding"]);
     }
 
     #[test]
